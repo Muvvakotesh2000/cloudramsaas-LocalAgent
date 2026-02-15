@@ -1,10 +1,11 @@
-# agent_main.py
+# local_agent/agent_main.py
 import os
+import sys
 import shutil
 import zipfile
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 import requests
 from fastapi import FastAPI, HTTPException, Header
@@ -23,11 +24,12 @@ from agent_config import (
     SAFE_BASE_DIRS,
 )
 
-# You already have this file — we import your implementation.
-# It should expose something like list_local_tasks() or get_local_tasks().
 import agent_process_manager as pm
 
 from agent_installer import install_task, uninstall_task, run_task_now, task_status
+
+# ✅ Render backend base (Agent CAN reach it)
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://cloudramsaas-backend.onrender.com").rstrip("/")
 
 app = FastAPI(title="CloudRAMS Local Agent", version="1.0.0")
 
@@ -44,12 +46,16 @@ app.add_middleware(
 # -----------------------------
 def require_token(x_agent_token: Optional[str]):
     if not AGENT_TOKEN:
-        return  # token not enforced
+        return
     if (x_agent_token or "").strip() != AGENT_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized (bad agent token)")
 
+def _backend_headers(access_token: str) -> Dict[str, str]:
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Missing access_token for backend call")
+    return {"Authorization": f"Bearer {access_token}"}
+
 def _is_path_allowed(p: Path) -> bool:
-    # If SAFE_BASE_DIRS empty => allow all (not recommended)
     if not SAFE_BASE_DIRS:
         return True
     try:
@@ -61,7 +67,6 @@ def _is_path_allowed(p: Path) -> bool:
             if rp.is_relative_to(Path(base).resolve()):
                 return True
         except Exception:
-            # Python <3.9 fallback
             try:
                 rb = Path(base).resolve()
                 if str(rp).lower().startswith(str(rb).lower()):
@@ -96,10 +101,29 @@ class UploadToUrlRequest(BaseModel):
 
 class DownloadFromUrlRequest(BaseModel):
     url: str
-    filename: Optional[str] = None  # if not provided, auto-generate
+    filename: Optional[str] = None
 
 class InstallAutorunRequest(BaseModel):
-    python_exe: Optional[str] = None  # defaults to current interpreter
+    python_exe: Optional[str] = None
+
+# ✅ Proxy models (Agent -> Backend)
+class MigrateTasksProxyRequest(BaseModel):
+    access_token: str
+    vm_ip: str
+    task_names: List[str]
+
+class SyncNotepadProxyRequest(BaseModel):
+    access_token: str
+    vm_ip: str
+
+class MigrateVSCodeProxyRequest(BaseModel):
+    access_token: str
+    vm_ip: str
+
+class SaveProjectProxyRequest(BaseModel):
+    access_token: str
+    vm_ip: str
+    project_name: str
 
 # -----------------------------
 # Endpoints
@@ -112,13 +136,90 @@ def health():
 def running_tasks(x_agent_token: Optional[str] = Header(default=None)):
     require_token(x_agent_token)
 
-    # Your pm module should provide one of these. Adjust here if needed:
     if hasattr(pm, "get_local_tasks"):
         return pm.get_local_tasks()
     if hasattr(pm, "list_local_tasks"):
         return {"tasks": pm.list_local_tasks()}
     raise HTTPException(status_code=500, detail="agent_process_manager missing get_local_tasks/list_local_tasks")
 
+
+# =========================================================
+# ✅ Proxy endpoints: Agent -> Render Backend (protected)
+# =========================================================
+@app.post("/migrate_tasks")
+def migrate_tasks(req: MigrateTasksProxyRequest, x_agent_token: Optional[str] = Header(default=None)):
+    require_token(x_agent_token)
+    try:
+        r = requests.post(
+            f"{BACKEND_BASE_URL}/migrate_tasks/",
+            json={"vm_ip": req.vm_ip, "task_names": req.task_names},
+            headers={**_backend_headers(req.access_token), "Content-Type": "application/json"},
+            timeout=120,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Backend unreachable: {e}")
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail=r.text[:800])
+    return r.json()
+
+@app.post("/sync_notepad")
+def sync_notepad(req: SyncNotepadProxyRequest, x_agent_token: Optional[str] = Header(default=None)):
+    require_token(x_agent_token)
+    try:
+        r = requests.post(
+            f"{BACKEND_BASE_URL}/sync_notepad/",
+            json={"vm_ip": req.vm_ip},
+            headers={**_backend_headers(req.access_token), "Content-Type": "application/json"},
+            timeout=120,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Backend unreachable: {e}")
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail=r.text[:800])
+    return r.json()
+
+@app.post("/migrate_vscode")
+def migrate_vscode(req: MigrateVSCodeProxyRequest, x_agent_token: Optional[str] = Header(default=None)):
+    require_token(x_agent_token)
+    try:
+        r = requests.post(
+            f"{BACKEND_BASE_URL}/migrate_vscode/",
+            json={"vm_ip": req.vm_ip},
+            headers={**_backend_headers(req.access_token), "Content-Type": "application/json"},
+            timeout=180,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Backend unreachable: {e}")
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail=r.text[:800])
+    return r.json()
+
+@app.post("/save_project_to_local")
+def save_project_to_local(req: SaveProjectProxyRequest, x_agent_token: Optional[str] = Header(default=None)):
+    require_token(x_agent_token)
+    # NOTE: This assumes your backend implements save_project_to_local safely (likely by producing a URL/artifact).
+    # If backend still tries to write to E:\Kotesh\Projects it must be changed.
+    try:
+        r = requests.post(
+            f"{BACKEND_BASE_URL}/save_project_to_local",
+            json={"vm_ip": req.vm_ip, "project_name": req.project_name},
+            headers={**_backend_headers(req.access_token), "Content-Type": "application/json"},
+            timeout=300,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Backend unreachable: {e}")
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail=r.text[:800])
+    return r.json()
+
+
+# -----------------------------
+# Zip/Upload/Download utilities
+# -----------------------------
 @app.post("/zip_folder")
 def zip_folder(req: ZipFolderRequest, x_agent_token: Optional[str] = Header(default=None)):
     require_token(x_agent_token)
@@ -133,7 +234,6 @@ def zip_folder(req: ZipFolderRequest, x_agent_token: Optional[str] = Header(defa
     zip_name = f"{src.name}_{uuid.uuid4().hex[:8]}.zip"
     zip_path = CACHE_DIR / zip_name
 
-    # Clean old file if exists
     if zip_path.exists():
         zip_path.unlink(missing_ok=True)
 
@@ -177,9 +277,6 @@ def download_from_url(req: DownloadFromUrlRequest, x_agent_token: Optional[str] 
     require_token(x_agent_token)
 
     filename = req.filename or f"download_{uuid.uuid4().hex[:8]}"
-    out_path = DOWNLOADS_DIR / filename
-
-    # prevent weird paths
     out_path = DOWNLOADS_DIR / Path(filename).name
 
     try:
@@ -212,7 +309,7 @@ def download_from_url(req: DownloadFromUrlRequest, x_agent_token: Optional[str] 
 def install_autorun(req: InstallAutorunRequest, x_agent_token: Optional[str] = Header(default=None)):
     require_token(x_agent_token)
 
-    python_exe = req.python_exe or shutil.which("python") or sys.executable  # type: ignore
+    python_exe = req.python_exe or shutil.which("python") or sys.executable
     agent_main_path = str(Path(__file__).resolve())
 
     if not python_exe:
@@ -226,7 +323,7 @@ def uninstall_autorun(x_agent_token: Optional[str] = Header(default=None)):
     return uninstall_task()
 
 @app.post("/run_autorun_now")
-def run_autorun(x_agent_token: Optional[str] = Header(default=None)):
+def run_autorun_now(x_agent_token: Optional[str] = Header(default=None)):
     require_token(x_agent_token)
     return run_task_now()
 
