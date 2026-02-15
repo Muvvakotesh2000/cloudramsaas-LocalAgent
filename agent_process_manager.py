@@ -32,6 +32,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+import psutil
+import logging
+
+logger = logging.getLogger("cloudramsaas_localagent")
+
+def get_local_tasks():
+    try:
+        target_tasks = ["notepad++.exe", "chrome.exe", "Code.exe"]
+        tasks = []
+        for p in psutil.process_iter(["pid", "name"]):
+            name = (p.info.get("name") or "")
+            if name in target_tasks:
+                tasks.append({"pid": p.info["pid"], "name": name})
+        return {"tasks": tasks}
+    except Exception as e:
+        logger.exception(f"Error fetching local tasks: {e}")
+        return {"tasks": []}
+
+# Optional: if any old code calls list_local_tasks()
+def list_local_tasks():
+    # If you want list_local_tasks() to return a list only:
+    return get_local_tasks().get("tasks", [])
 
 class ProcessManager:
     def __init__(self):

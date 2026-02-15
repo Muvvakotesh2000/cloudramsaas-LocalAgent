@@ -4,3 +4,6 @@ requests
 psutil
 pydantic
 python-multipart
+boto3
+watchdog
+pywin32
