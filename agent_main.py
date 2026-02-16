@@ -122,10 +122,6 @@ class SyncNotepadRequest(BaseModel):
     access_token: str
     vm_ip: str
 
-class MigrateVSCodeRequest(BaseModel):
-    access_token: str
-    vm_ip: str
-
 class SaveProjectToLocalRequest(BaseModel):
     access_token: str
     vm_ip: str
