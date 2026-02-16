@@ -128,6 +128,10 @@ class SaveProjectToLocalRequest(BaseModel):
     project_name: str
     local_base: Optional[str] = None  # optional override
 
+class MigrateTasksRequest(BaseModel):
+    task_names: list[str]
+    vm_ip: str
+
 # -----------------------------
 # Endpoints
 # -----------------------------
@@ -171,6 +175,19 @@ def migrate_vscode(req: MigrateVSCodeRequest, x_agent_token: Optional[str] = Hea
 
     return {"message": "VSCode migrated", "opened_path": opened_path}
 
+@app.post("/migrate_tasks")
+@app.post("/migrate_tasks/")
+async def migrate_tasks(request: MigrateTasksRequest):
+    results = []
+    for task_name in request.task_names:
+        success = process_manager.move_task_to_cloud(
+            task_name,
+            request.vm_ip,
+            sync_state=(task_name == "notepad++.exe"),
+        )
+        results.append({"task": task_name, "success": success})
+    return {"results": results}
+
 @app.post("/sync_notepad")
 @app.post("/sync_notepad/")
 def sync_notepad(req: SyncNotepadRequest, x_agent_token: Optional[str] = Header(default=None)):
@@ -185,29 +202,6 @@ def sync_notepad(req: SyncNotepadRequest, x_agent_token: Optional[str] = Header(
         return {"message": "Notepad sync triggered"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"sync_notepad failed: {e}")
-
-@app.post("/migrate_vscode")
-@app.post("/migrate_vscode/")
-def migrate_vscode(req: MigrateVSCodeRequest, x_agent_token: Optional[str] = Header(default=None)):
-    require_token(x_agent_token)
-
-    if not req.vm_ip:
-        raise HTTPException(status_code=400, detail="vm_ip is required")
-
-    # You need a user_id for your S3 key prefixing in migrate_vscode_project()
-    # Option A: set env var CLOUDRAM_USER_ID on your PC
-    user_id = os.getenv("CLOUDRAM_USER_ID", "").strip()
-    if not user_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing CLOUDRAM_USER_ID env var on agent. Set it to your Supabase user id.",
-        )
-
-    ok, opened_path, err = process_manager.migrate_vscode_project(vm_ip=req.vm_ip, user_id=user_id)
-    if not ok:
-        raise HTTPException(status_code=500, detail=err or "VSCode migration failed")
-
-    return {"message": "VSCode migrated", "opened_path": opened_path}
 
 @app.post("/save_project_to_local")
 @app.post("/save_project_to_local/")
