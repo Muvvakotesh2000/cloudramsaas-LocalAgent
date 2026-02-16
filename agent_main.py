@@ -1,6 +1,6 @@
 # local_agent/agent_main.py
-# ✅ Local Agent (runs on your PC) — does LOCAL work + talks directly to VM (NO Render proxy)
-# ✅ Fixes your issue: /migrate_tasks and /migrate_vscode should NOT call Render backend
+# ✅ Local Agent (runs on your PC) — does LOCAL work + talks directly to VM
+# ✅ Uses backend-issued pre-signed URLs (NO AWS creds on local)
 # ✅ Keeps: /health, /running_tasks, /zip_folder, /upload_to_url, /download_from_url, autorun endpoints
 
 import os
@@ -121,14 +121,18 @@ class MigrateVSCodeRequest(BaseModel):
 class SyncNotepadRequest(BaseModel):
     access_token: str
     vm_ip: str
+    user_id: str
 
 class SaveProjectToLocalRequest(BaseModel):
     access_token: str
     vm_ip: str
     project_name: str
+    user_id: str
     local_base: Optional[str] = None  # optional override
 
 class MigrateTasksRequest(BaseModel):
+    access_token: str
+    user_id: str
     task_names: list[str]
     vm_ip: str
 
@@ -143,11 +147,9 @@ def health():
 def running_tasks(x_agent_token: Optional[str] = Header(default=None)):
     require_token(x_agent_token)
 
-    # Prefer module-level helper (you already have this)
     if hasattr(pm, "get_local_tasks"):
         return pm.get_local_tasks()
 
-    # Or fallback to ProcessManager method
     if hasattr(process_manager, "get_local_tasks"):
         return process_manager.get_local_tasks()
 
@@ -157,7 +159,7 @@ def running_tasks(x_agent_token: Optional[str] = Header(default=None)):
     raise HTTPException(status_code=500, detail="agent_process_manager missing get_local_tasks/list_local_tasks")
 
 # =========================================================
-# ✅ LOCAL endpoints (NO Render backend calls)
+# ✅ LOCAL endpoints (browser -> agent)
 # =========================================================
 @app.post("/migrate_vscode")
 @app.post("/migrate_vscode/")
@@ -168,8 +170,14 @@ def migrate_vscode(req: MigrateVSCodeRequest, x_agent_token: Optional[str] = Hea
         raise HTTPException(status_code=400, detail="vm_ip is required")
     if not req.user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
+    if not req.access_token:
+        raise HTTPException(status_code=400, detail="access_token is required")
 
-    ok, opened_path, err = process_manager.migrate_vscode_project(vm_ip=req.vm_ip, user_id=req.user_id)
+    ok, opened_path, err = process_manager.migrate_vscode_project(
+        vm_ip=req.vm_ip,
+        user_id=req.user_id,
+        access_token=req.access_token,
+    )
     if not ok:
         raise HTTPException(status_code=500, detail=err or "VSCode migration failed")
 
@@ -177,15 +185,26 @@ def migrate_vscode(req: MigrateVSCodeRequest, x_agent_token: Optional[str] = Hea
 
 @app.post("/migrate_tasks")
 @app.post("/migrate_tasks/")
-async def migrate_tasks(request: MigrateTasksRequest):
+async def migrate_tasks(req: MigrateTasksRequest, x_agent_token: Optional[str] = Header(default=None)):
+    require_token(x_agent_token)
+
+    if not req.vm_ip:
+        raise HTTPException(status_code=400, detail="vm_ip is required")
+    if not req.user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if not req.access_token:
+        raise HTTPException(status_code=400, detail="access_token is required")
+
     results = []
-    for task_name in request.task_names:
+    for task_name in req.task_names:
         success = process_manager.move_task_to_cloud(
             task_name,
-            request.vm_ip,
-            sync_state=(task_name == "notepad++.exe"),
+            req.vm_ip,
+            access_token=req.access_token,
+            user_id=req.user_id,
+            sync_state=(task_name.lower() == "notepad++.exe"),
         )
-        results.append({"task": task_name, "success": success})
+        results.append({"task": task_name, "success": bool(success)})
     return {"results": results}
 
 @app.post("/sync_notepad")
@@ -195,11 +214,23 @@ def sync_notepad(req: SyncNotepadRequest, x_agent_token: Optional[str] = Header(
 
     if not req.vm_ip:
         raise HTTPException(status_code=400, detail="vm_ip is required")
+    if not req.user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if not req.access_token:
+        raise HTTPException(status_code=400, detail="access_token is required")
 
-    # Best effort: just run a sync now
+    # Best effort: upload all currently tracked files (presigned PUT)
     try:
-        process_manager.sync_notepad_files(vm_ip=req.vm_ip, upload=True)
-        return {"message": "Notepad sync triggered"}
+        # Set context for background sync too
+        process_manager.vm_ip = req.vm_ip
+        process_manager._last_access_token = req.access_token
+        process_manager._last_user_id = req.user_id
+
+        if hasattr(process_manager, "tracked_files") and process_manager.tracked_files:
+            for f in list(process_manager.tracked_files):
+                process_manager.sync_specific_file(f, access_token=req.access_token, user_id=req.user_id)
+
+        return {"message": "Notepad sync triggered (tracked files uploaded)"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"sync_notepad failed: {e}")
 
@@ -212,21 +243,19 @@ def save_project_to_local(req: SaveProjectToLocalRequest, x_agent_token: Optiona
         raise HTTPException(status_code=400, detail="vm_ip is required")
     if not req.project_name:
         raise HTTPException(status_code=400, detail="project_name is required")
-
-    user_id = os.getenv("CLOUDRAM_USER_ID", "").strip()
-    if not user_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing CLOUDRAM_USER_ID env var on agent. Set it to your Supabase user id.",
-        )
+    if not req.user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if not req.access_token:
+        raise HTTPException(status_code=400, detail="access_token is required")
 
     local_base = req.local_base or os.getenv("CLOUDRAM_LOCAL_BASE", r"E:\Kotesh\Projects")
 
     ok, msg = process_manager.save_project_from_vm_to_local(
         vm_ip=req.vm_ip,
-        user_id=user_id,
+        user_id=req.user_id,
         project_name=req.project_name,
         local_base=local_base,
+        access_token=req.access_token,
     )
     if not ok:
         raise HTTPException(status_code=500, detail=msg)
