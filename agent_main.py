@@ -147,6 +147,7 @@ def running_tasks(x_agent_token: Optional[str] = Header(default=None)):
 # ✅ Proxy endpoints: Agent -> Render Backend (protected)
 # =========================================================
 @app.post("/migrate_tasks")
+@app.post("/migrate_tasks/")
 def migrate_tasks(req: MigrateTasksProxyRequest, x_agent_token: Optional[str] = Header(default=None)):
     require_token(x_agent_token)
     try:
@@ -181,6 +182,7 @@ def sync_notepad(req: SyncNotepadProxyRequest, x_agent_token: Optional[str] = He
     return r.json()
 
 @app.post("/migrate_vscode")
+@app.post("/migrate_vscode/")
 def migrate_vscode(req: MigrateVSCodeProxyRequest, x_agent_token: Optional[str] = Header(default=None)):
     require_token(x_agent_token)
     try:
