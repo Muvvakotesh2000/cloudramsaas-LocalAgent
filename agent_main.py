@@ -113,10 +113,10 @@ class InstallAutorunRequest(BaseModel):
     python_exe: Optional[str] = None
 
 # ✅ Local action models (Browser -> Agent)
-class MigrateTasksRequest(BaseModel):
-    access_token: str  # kept for future; not required for local migration
+class MigrateVSCodeRequest(BaseModel):
+    access_token: str
     vm_ip: str
-    task_names: list[str]
+    user_id: str
 
 class SyncNotepadRequest(BaseModel):
     access_token: str
@@ -159,23 +159,21 @@ def running_tasks(x_agent_token: Optional[str] = Header(default=None)):
 # =========================================================
 # ✅ LOCAL endpoints (NO Render backend calls)
 # =========================================================
-@app.post("/migrate_tasks")
-@app.post("/migrate_tasks/")
-def migrate_tasks(req: MigrateTasksRequest, x_agent_token: Optional[str] = Header(default=None)):
+@app.post("/migrate_vscode")
+@app.post("/migrate_vscode/")
+def migrate_vscode(req: MigrateVSCodeRequest, x_agent_token: Optional[str] = Header(default=None)):
     require_token(x_agent_token)
 
     if not req.vm_ip:
         raise HTTPException(status_code=400, detail="vm_ip is required")
-    if not req.task_names:
-        raise HTTPException(status_code=400, detail="task_names is required")
+    if not req.user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
 
-    results = []
-    for task_name in req.task_names:
-        sync_state = (task_name.lower() == "notepad++.exe")
-        ok = process_manager.move_task_to_cloud(task_name, req.vm_ip, sync_state=sync_state)
-        results.append({"task": task_name, "success": bool(ok)})
+    ok, opened_path, err = process_manager.migrate_vscode_project(vm_ip=req.vm_ip, user_id=req.user_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail=err or "VSCode migration failed")
 
-    return {"results": results}
+    return {"message": "VSCode migrated", "opened_path": opened_path}
 
 @app.post("/sync_notepad")
 @app.post("/sync_notepad/")
