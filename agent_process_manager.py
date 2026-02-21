@@ -23,6 +23,7 @@ import sqlite3
 from urllib.parse import urlparse, unquote
 from pathlib import Path
 from typing import Optional, Dict
+from requests.exceptions import ReadTimeout, ConnectTimeout, ConnectionError
 
 # Configure logging
 logging.basicConfig(
@@ -404,6 +405,7 @@ class ProcessManager:
         except Exception as e:
             logger.warning(f"Could not taskkill Code.exe: {e}")
 
+        
         # Tell VM to pull + open
         try:
             payload = {
@@ -419,25 +421,47 @@ class ProcessManager:
                 "deps_meta_s3_key": dep_key_meta,
             }
 
-            r = requests.post(f"http://{vm_ip}:5000/setup_vscode", json=payload, timeout=30)
+            r = requests.post(f"http://{vm_ip}:5000/setup_vscode", json=payload, timeout=60)
             if r.status_code != 200:
                 return False, opened_path, f"VM setup_vscode failed: {r.status_code} {r.text}"
 
-            job_id = r.json().get("job_id")
+            job_id = (r.json() or {}).get("job_id")
             if not job_id:
                 return False, opened_path, "VM did not return job_id."
 
-            for _ in range(60):
-                s = requests.get(f"http://{vm_ip}:5000/vscode_setup_status/{job_id}", timeout=10)
-                if s.status_code == 200:
-                    j = s.json()
-                    if j.get("status") == "done":
-                        return True, opened_path, None
-                    if j.get("status") == "error":
-                        return False, opened_path, f"VM setup error: {j.get('message')}"
+            # ✅ timeout-tolerant polling
+            deadline = time.time() + (60 * 10)  # 10 minutes
+            last_status = None
+
+            while time.time() < deadline:
+                try:
+                    s = requests.get(
+                        f"http://{vm_ip}:5000/vscode_setup_status/{job_id}",
+                        timeout=30,   # bump from 10
+                    )
+
+                    if s.status_code == 200:
+                        j = s.json() or {}
+                        last_status = j
+                        st = j.get("status")
+
+                        if st == "done":
+                            return True, opened_path, None
+                        if st == "error":
+                            return False, opened_path, f"VM setup error: {j.get('message')}"
+
+                    # if non-200 just keep polling
+                except (ReadTimeout, ConnectTimeout, ConnectionError) as e:
+                    # ✅ VM is busy or temporarily not responding — keep polling
+                    logger.warning(f"VM status poll transient issue: {e}")
+
                 time.sleep(5)
 
+            # Timeout: return best info we have
+            if last_status:
+                return False, opened_path, f"Timed out waiting for VM. Last status: {last_status}"
             return False, opened_path, "Timed out waiting for VM to finish VSCode setup."
+
         except Exception as e:
             return False, opened_path, f"Could not contact VM: {e}"
 
